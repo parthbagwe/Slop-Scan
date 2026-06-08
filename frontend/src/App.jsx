@@ -415,25 +415,41 @@ function HowItWorks() {
 }
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab,    setTab]    = useState("text");
-  const [text,   setText]   = useState("");
-  const [phase,  setPhase]  = useState("input");   // input | loading | results
-  const [result, setResult] = useState(null);
-  const [loadStep, setLoadStep] = useState(0);
-  const taRef = useRef(null);
+  const [tab,          setTab]          = useState("text");
+  const [text,         setText]         = useState("");
+  const [phase,        setPhase]        = useState("input");
+  const [result,       setResult]       = useState(null);
+  const [loadStep,     setLoadStep]     = useState(0);
 
+  // ── FEEDBACK STATE ──────────────────────────────────────────────
+  // feedbackPhase tracks where the user is in the feedback flow:
+  // "idle"      → buttons not yet shown (initial state)
+  // "asking"    → showing YES/NO buttons
+  // "wrong"     → user said NO, now asking what it actually was
+  // "done"      → feedback submitted, show thank you
+  const [feedbackPhase, setFeedbackPhase] = useState("idle");
+  const [feedbackLog,   setFeedbackLog]   = useState([]);
+  // feedbackLog stores all corrections in memory.
+  // In production this goes to POST /api/feedback
+  // and gets saved to PostgreSQL for retraining.
+
+  const taRef = useRef(null);
   const charCount = text.length;
 
   async function analyze() {
     if (text.trim().length < 50) {
-      if (taRef.current) { taRef.current.style.borderColor = "rgba(255,77,77,0.5)"; setTimeout(() => { if(taRef.current) taRef.current.style.borderColor = ""; }, 1200); }
+      if (taRef.current) {
+        taRef.current.style.borderColor = "rgba(255,77,77,0.5)";
+        setTimeout(() => { if(taRef.current) taRef.current.style.borderColor = ""; }, 1200);
+      }
       return;
     }
     setPhase("loading");
     setLoadStep(0);
+    setFeedbackPhase("idle");
 
-    // Simulate step progression
     const steps = [0,1,2,3,4];
     for (let i = 0; i < steps.length; i++) {
       await new Promise(r => setTimeout(r, 380));
@@ -441,16 +457,247 @@ export default function App() {
     }
     await new Promise(r => setTimeout(r, 200));
 
-    // In production: call detectApi.submitText(text) → poll useDetectionJob(jobId)
     const res = mockDetect(text);
     setResult(res);
     setPhase("results");
+
+    // Show feedback buttons 1 second after results appear
+    // (give user time to read the result first)
+    setTimeout(() => setFeedbackPhase("asking"), 1000);
   }
 
   function reset() {
     setPhase("input");
     setResult(null);
     setLoadStep(0);
+    setFeedbackPhase("idle");
+  }
+
+  // ── FEEDBACK HANDLERS ───────────────────────────────────────────
+
+  function handleCorrect() {
+    // User confirmed the verdict was right
+    // Store positive confirmation
+    const entry = {
+      text:            text.slice(0, 500),
+      predicted_label: result.ai_probability >= 0.5 ? "AI" : "human",
+      predicted_prob:  result.ai_probability,
+      true_label:      result.ai_probability >= 0.5 ? "AI" : "human",
+      is_correct:      true,
+      feature_scores:  result.feature_scores,
+      timestamp:       new Date().toISOString(),
+    };
+    setFeedbackLog(prev => [...prev, entry]);
+    console.log("✅ Feedback: CORRECT", entry);
+
+    // In production replace console.log with:
+    // await fetch("/api/feedback", { method:"POST", body: JSON.stringify(entry) })
+
+    setFeedbackPhase("done");
+  }
+
+  function handleWrong() {
+    // User said verdict was wrong — ask what it actually was
+    setFeedbackPhase("wrong");
+  }
+
+  function handleTrueLabel(trueLabel) {
+    // User told us what the text actually was
+    const predictedLabel = result.ai_probability >= 0.5 ? "AI" : "human";
+    const entry = {
+      text:            text.slice(0, 500),
+      predicted_label: predictedLabel,
+      predicted_prob:  result.ai_probability,
+      true_label:      trueLabel,
+      is_correct:      false,
+      feature_scores:  result.feature_scores,
+      timestamp:       new Date().toISOString(),
+    };
+    setFeedbackLog(prev => [...prev, entry]);
+    console.log("❌ Feedback: INCORRECT →", trueLabel, entry);
+
+    // In production:
+    // await fetch("/api/feedback", { method:"POST", body: JSON.stringify(entry) })
+    // When 50+ entries collected on server → triggers retraining automatically
+
+    setFeedbackPhase("done");
+  }
+
+  // ── FEEDBACK UI COMPONENT ───────────────────────────────────────
+  function FeedbackPanel() {
+    if (feedbackPhase === "idle") return null;
+
+    // ── THANK YOU STATE ─────────────────────────────────────────
+    if (feedbackPhase === "done") {
+      return (
+        <div style={{
+          margin:"14px 0",
+          padding:"12px 16px",
+          background:"rgba(0,255,136,0.05)",
+          border:"1px solid rgba(0,255,136,0.15)",
+          borderRadius:4,
+          display:"flex",
+          alignItems:"center",
+          gap:12,
+        }}>
+          <span style={{ color:"#00ff88", fontSize:16 }}>✓</span>
+          <div>
+            <div style={{ fontFamily:"'IBM Plex Mono',monospace", fontSize:11, color:"#00ff88", letterSpacing:"0.08em" }}>
+              FEEDBACK RECORDED
+            </div>
+            <div style={{ fontFamily:"'IBM Plex Sans',sans-serif", fontSize:11, color:"#3a4048", marginTop:2 }}>
+              Your correction helps retrain the model. After 50 corrections, retraining triggers automatically.
+            </div>
+          </div>
+          <div style={{ marginLeft:"auto", fontFamily:"'IBM Plex Mono',monospace", fontSize:10, color:"#2a2f38" }}>
+            {feedbackLog.length} logged this session
+          </div>
+        </div>
+      );
+    }
+
+    // ── WRONG: ASK WHAT IT ACTUALLY WAS ────────────────────────
+    if (feedbackPhase === "wrong") {
+      return (
+        <div style={{
+          margin:"14px 0",
+          padding:"16px",
+          background:"rgba(255,170,0,0.04)",
+          border:"1px solid rgba(255,170,0,0.15)",
+          borderRadius:4,
+        }}>
+          <div style={{
+            fontFamily:"'IBM Plex Mono',monospace",
+            fontSize:9,
+            color:"#5a626e",
+            letterSpacing:"0.14em",
+            textTransform:"uppercase",
+            marginBottom:12,
+          }}>
+            What was it actually?
+          </div>
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+            <button
+              onClick={() => handleTrueLabel("human")}
+              style={{
+                padding:"9px 18px",
+                borderRadius:3,
+                border:"1px solid rgba(68,204,136,0.3)",
+                background:"rgba(68,204,136,0.08)",
+                color:"#44cc88",
+                fontFamily:"'IBM Plex Mono',monospace",
+                fontSize:11,
+                cursor:"pointer",
+                letterSpacing:"0.06em",
+                transition:"all 0.15s",
+              }}
+            >
+              👤 HUMAN WRITTEN
+            </button>
+            <button
+              onClick={() => handleTrueLabel("AI")}
+              style={{
+                padding:"9px 18px",
+                borderRadius:3,
+                border:"1px solid rgba(255,77,77,0.3)",
+                background:"rgba(255,77,77,0.08)",
+                color:"#ff4d4d",
+                fontFamily:"'IBM Plex Mono',monospace",
+                fontSize:11,
+                cursor:"pointer",
+                letterSpacing:"0.06em",
+                transition:"all 0.15s",
+              }}
+            >
+              🤖 AI GENERATED
+            </button>
+            <button
+              onClick={() => setFeedbackPhase("idle")}
+              style={{
+                padding:"9px 14px",
+                borderRadius:3,
+                border:"1px solid rgba(255,255,255,0.06)",
+                background:"transparent",
+                color:"#3a4048",
+                fontFamily:"'IBM Plex Mono',monospace",
+                fontSize:11,
+                cursor:"pointer",
+                letterSpacing:"0.06em",
+              }}
+            >
+              CANCEL
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // ── DEFAULT: ASK IF CORRECT ─────────────────────────────────
+    return (
+      <div style={{
+        margin:"14px 0",
+        padding:"16px",
+        background:"rgba(255,255,255,0.02)",
+        border:"1px solid rgba(255,255,255,0.06)",
+        borderRadius:4,
+      }}>
+        <div style={{
+          fontFamily:"'IBM Plex Mono',monospace",
+          fontSize:9,
+          color:"#5a626e",
+          letterSpacing:"0.14em",
+          textTransform:"uppercase",
+          marginBottom:12,
+        }}>
+          // Human-in-the-loop validation — was this verdict correct?
+        </div>
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+          <button
+            onClick={handleCorrect}
+            style={{
+              padding:"9px 18px",
+              borderRadius:3,
+              border:"1px solid rgba(0,255,136,0.25)",
+              background:"rgba(0,255,136,0.06)",
+              color:"#00ff88",
+              fontFamily:"'IBM Plex Mono',monospace",
+              fontSize:11,
+              cursor:"pointer",
+              letterSpacing:"0.06em",
+              transition:"all 0.15s",
+            }}
+          >
+            ✅ YES, CORRECT
+          </button>
+          <button
+            onClick={handleWrong}
+            style={{
+              padding:"9px 18px",
+              borderRadius:3,
+              border:"1px solid rgba(255,77,77,0.25)",
+              background:"rgba(255,77,77,0.06)",
+              color:"#ff4d4d",
+              fontFamily:"'IBM Plex Mono',monospace",
+              fontSize:11,
+              cursor:"pointer",
+              letterSpacing:"0.06em",
+              transition:"all 0.15s",
+            }}
+          >
+            ❌ NO, IT WAS WRONG
+          </button>
+        </div>
+        <div style={{
+          fontFamily:"'IBM Plex Sans',sans-serif",
+          fontSize:11,
+          color:"#2a2f38",
+          marginTop:8,
+          lineHeight:1.5,
+        }}>
+          Your feedback trains the model. After 50 corrections, retraining triggers automatically via Celery.
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -498,7 +745,6 @@ export default function App() {
               <>
                 {phase === "input" && (
                   <div style={{ padding:"20px 20px 20px" }}>
-                    {/* Sample row */}
                     <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10, flexWrap:"wrap" }}>
                       <span style={{ fontFamily:"'IBM Plex Mono',monospace", fontSize:9, color:"#2a2f38", letterSpacing:"0.1em", textTransform:"uppercase" }}>Load sample:</span>
                       {Object.keys(SAMPLES).map(k => (
@@ -530,6 +776,11 @@ export default function App() {
                 {phase === "results" && result && (
                   <div style={{ padding:"16px 20px" }}>
                     <VerdictBanner result={result} />
+
+                    {/* ── FEEDBACK PANEL ── */}
+                    {/* Appears 1 second after verdict, asks user to validate */}
+                    <FeedbackPanel />
+
                     <ScoreGrid result={result} />
                     <FeatureBreakdown scores={result.feature_scores} />
                     <ExplanationPanel items={result.explanation} />
