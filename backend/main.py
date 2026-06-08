@@ -27,3 +27,9 @@ app.include_router(detection.router, prefix="/api")
 @app.get("/health")
 def health():
     return {"status": "healthy", "version": "1.0.0"}
+
+# Add this import at the top with the others
+from app.api import auth, detection, feedback
+
+# Add this line after the existing include_router lines
+app.include_router(feedback.router, prefix="/api")
